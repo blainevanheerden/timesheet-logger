@@ -22,6 +22,7 @@ test('offline job is pending and sync clears pending', async ({ page }) => {
   // Fill job details
   await page.fill('input[placeholder="Client Name"]', 'Offline Client');
   await page.fill('input[placeholder="Client Phone Number"]', '0123456789');
+  await page.fill('input[placeholder="Client Email Address"]', 'offline@example.com');
   await page.fill('input[placeholder="Client Address"]', '123 Test St');
   await page.fill('textarea[placeholder="Job Description / Call Out Reason"]', 'Test offline job');
 

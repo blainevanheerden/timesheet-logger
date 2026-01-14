@@ -203,8 +203,8 @@ export default function TimesheetLogger() {
   };
 
   const startJob = () => {
-    if (!client || !clientPhone || !clientAddress || !jobDescription) {
-      window.alert('Please enter all client details and job description');
+    if (!client || !clientPhone || !clientAddress || !clientEmail || !jobDescription) {
+      window.alert('Please enter all client details (including email) and job description');
       return;
     }
     if (!dailySession) {
@@ -217,6 +217,7 @@ export default function TimesheetLogger() {
       client,
       clientPhone,
       clientAddress,
+      clientEmail,
       jobDescription,
       technician: technicianName,
       startTime: new Date().toISOString(),
@@ -258,6 +259,8 @@ export default function TimesheetLogger() {
     setActiveJob(null);
     setClient('');
     setClientPhone('');
+    setClientEmail('');
+    setClientAddress('');
     setClientAddress('');
     setJobDescription('');
     setResolution('');
@@ -400,6 +403,61 @@ export default function TimesheetLogger() {
     return () => window.removeEventListener('online', onOnline);
   }, [jobs]);
 
+  // Helper to convert a blob to base64
+  const blobToBase64 = (blob) => new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onloadend = () => resolve(reader.result.split(',')[1]);
+    reader.onerror = reject;
+    reader.readAsDataURL(blob);
+  });
+
+  const saveBlobToFile = async (blob, filename) => {
+    // 1) Try File System Access API (Chromium)
+    try {
+      if (window.showSaveFilePicker) {
+        const opts = {
+          suggestedName: filename,
+          types: [{ description: 'PDF', accept: { 'application/pdf': ['.pdf'] } }],
+        };
+        const handle = await window.showSaveFilePicker(opts);
+        const writable = await handle.createWritable();
+        await writable.write(blob);
+        await writable.close();
+        return true;
+      }
+    } catch (e) {
+      console.warn('File System Access API not available or failed', e);
+    }
+
+    // 2) Try Capacitor Filesystem (native)
+    try {
+      const fs = await import(/* @vite-ignore */ '@capacitor/filesystem');
+      const base64 = await blobToBase64(blob);
+      await fs.Filesystem.writeFile({ path: filename, data: base64, directory: fs.FilesystemDirectory.Documents });
+      // Optionally offer share
+      try {
+        const { Share } = await import(/* @vite-ignore */ '@capacitor/share');
+        await Share.share({ title: filename, text: 'Timesheet PDF', url: filename });
+      } catch (err) {
+        // ignore
+      }
+      return true;
+    } catch (e) {
+      console.warn('Capacitor Filesystem not available or failed', e);
+    }
+
+    // 3) Fallback: trigger browser download (no location prompt)
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    return true;
+  };
+
   const generatePDF = async () => {
     const todayJobs = getTodayJobs();
     const todayDate = new Date().toDateString();
@@ -470,6 +528,8 @@ export default function TimesheetLogger() {
         y += 6;
         doc.text(`Client: ${job.client}`, 12, y);
         y += 6;
+        doc.text(`Email: ${job.clientEmail || ''}`, 12, y);
+        y += 6;
         doc.text(`Phone: ${job.clientPhone}`, 12, y);
         y += 6;
         doc.text(`Address: ${job.clientAddress}`, 12, y);
@@ -487,11 +547,86 @@ export default function TimesheetLogger() {
       });
 
       const filename = `timesheet-${date.replace(/\//g, '-')}.pdf`;
-      doc.save(filename);
+      // Create blob and use save helper so users can choose where to save (when supported)
+      const blob = doc.output('blob');
+      await saveBlobToFile(blob, filename);
       window.alert('PDF generated successfully!');
     } catch (error) {
       console.error('PDF generation error:', error);
       window.alert('Failed to generate PDF');
+    }
+  };
+
+  // Generate monthly PDF with overtime summary and job cards
+  const generateMonthlyPDF = async () => {
+    try {
+      const { jsPDF } = await import('jspdf');
+      const doc = new jsPDF();
+      const now = new Date();
+      const month = now.toLocaleString(undefined, { month: 'long', year: 'numeric' });
+      doc.setFontSize(16);
+      doc.text(`MONTHLY TIMESHEET - ${month}`, 10, 14);
+      doc.setFontSize(12);
+      let y = 26;
+
+      const monthJobs = jobs.filter(j => {
+        const d = new Date(j.startTime);
+        return d.getMonth() === now.getMonth() && d.getFullYear() === now.getFullYear();
+      });
+
+      const totalOvertime = monthJobs.reduce((sum, j) => sum + parseFloat(j.overtime || 0), 0).toFixed(2);
+
+      doc.text(`Total Overtime: ${totalOvertime} hrs`, 10, y);
+      y += 10;
+
+      doc.text('Overtime Breakdown:', 10, y);
+      y += 8;
+
+      monthJobs.forEach((job, idx) => {
+        if (parseFloat(job.overtime || 0) > 0) {
+          doc.text(`${formatDate(job.startTime)} - ${job.client} - ${job.overtime} hrs (${job.afterHours ? 'After Hours' : 'Normal'})`, 12, y);
+          y += 6;
+          if (y > 270) { doc.addPage(); y = 20; }
+        }
+      });
+
+      // Add job cards
+      doc.addPage();
+      doc.setFontSize(14);
+      doc.text('JOB CARDS', 10, 14);
+      y = 26;
+
+      monthJobs.forEach((job, idx) => {
+        doc.setFontSize(12);
+        doc.text(`Job ${idx + 1}${job.afterHours ? ' (AFTER HOURS)' : ''}`, 10, y);
+        y += 6;
+        doc.text(`Date: ${formatDate(job.startTime)}`, 12, y);
+        y += 6;
+        doc.text(`Client: ${job.client}`, 12, y);
+        y += 6;
+        doc.text(`Email: ${job.clientEmail || ''}`, 12, y);
+        y += 6;
+        doc.text(`Phone: ${job.clientPhone}`, 12, y);
+        y += 6;
+        doc.text(`Address: ${job.clientAddress}`, 12, y);
+        y += 6;
+        doc.text(`Description: ${job.jobDescription}`, 12, y);
+        y += 6;
+        doc.text(`Resolution: ${job.resolution || ''}`, 12, y);
+        y += 6;
+        doc.text(`Hours: ${job.hoursWorked || ''} Overtime: ${job.overtime || '0.00'}`, 12, y);
+        y += 10;
+
+        if (y > 270) { doc.addPage(); y = 20; }
+      });
+
+      const filename = `timesheet-month-${now.getFullYear()}-${now.getMonth() + 1}.pdf`;
+      const blob = doc.output('blob');
+      await saveBlobToFile(blob, filename);
+      window.alert('Monthly PDF generated successfully!');
+    } catch (err) {
+      console.error('Monthly PDF error', err);
+      window.alert('Failed to generate monthly PDF');
     }
   };
 
@@ -645,6 +780,13 @@ export default function TimesheetLogger() {
                   onChange={(e) => setClientAddress(e.target.value)}
                   className="w-full p-3 rounded-lg text-gray-800 mb-3"
                 />
+                <input
+                  type="email"
+                  placeholder="Client Email Address"
+                  value={clientEmail}
+                  onChange={(e) => setClientEmail(e.target.value)}
+                  className="w-full p-3 rounded-lg text-gray-800 mb-3"
+                />
                 <textarea
                   placeholder="Job Description / Call Out Reason"
                   value={jobDescription}
@@ -701,16 +843,36 @@ export default function TimesheetLogger() {
               </div>
               <span className="text-2xl font-bold text-amber-600">{getMonthlyOvertime()} hrs</span>
             </div>
+            <div className="mt-3 text-sm text-gray-600">
+              <strong>Overtime breakdown:</strong>
+              <ul className="mt-2 list-disc list-inside">
+                {jobs
+                  .filter(j => (new Date(j.startTime)).getMonth() === (new Date()).getMonth())
+                  .filter(j => parseFloat(j.overtime || 0) > 0)
+                  .map(j => (
+                    <li key={j.id}>{`${formatDate(j.startTime)} — ${j.client} — ${j.overtime} hrs (${j.afterHours ? 'After Hours' : 'Normal'})`}</li>
+                  ))}
+              </ul>
+            </div>
           </div>
 
           {/* Export Button */}
-          <button
-            onClick={generatePDF}
-            className="w-full py-3 bg-green-600 text-white rounded-lg font-semibold hover:bg-green-700 transition flex items-center justify-center gap-2 mb-6"
-          >
-            <Download size={20} />
-            Export Today's Timesheet
-          </button>
+          <div className="space-y-3 mb-6">
+            <button
+              onClick={generatePDF}
+              className="w-full py-3 bg-green-600 text-white rounded-lg font-semibold hover:bg-green-700 transition flex items-center justify-center gap-2"
+            >
+              <Download size={20} />
+              Export Today's Timesheet
+            </button>
+            <button
+              onClick={generateMonthlyPDF}
+              className="w-full py-3 bg-blue-600 text-white rounded-lg font-semibold hover:bg-blue-700 transition flex items-center justify-center gap-2"
+            >
+              <Download size={20} />
+              Export Month's Timesheets & Job Cards
+            </button>
+          </div>
 
           {/* Today's Jobs */}
           <div>
