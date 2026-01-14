@@ -13,9 +13,11 @@ export default function TimesheetLogger() {
   const [client, setClient] = useState('');
   const [clientPhone, setClientPhone] = useState('');
   const [clientAddress, setClientAddress] = useState('');
+  const [clientEmail, setClientEmail] = useState('');
   const [jobDescription, setJobDescription] = useState('');
   const [resolution, setResolution] = useState('');
   const [location, setLocation] = useState('');
+  const [showSaveHelp, setShowSaveHelp] = useState(false);
 
   useEffect(() => {
     const storedTechnician = localStorage.getItem('technicianName');
@@ -64,6 +66,10 @@ export default function TimesheetLogger() {
         try {
           const { Geolocation } = await import('@capacitor/geolocation');
           setLocation('Requesting native location...');
+          // Request runtime permissions explicitly when available (some Capacitor versions provide requestPermissions)
+          if (typeof Geolocation.requestPermissions === 'function') {
+            try { await Geolocation.requestPermissions(); } catch(e) { console.warn('requestPermissions failed', e); }
+          }
           const pos = await Geolocation.getCurrentPosition({ enableHighAccuracy: true, timeout: 15000 });
           const loc = `${pos.coords.latitude.toFixed(4)}, ${pos.coords.longitude.toFixed(4)}`;
           setLocation(loc);
@@ -429,19 +435,22 @@ export default function TimesheetLogger() {
       console.warn('File System Access API not available or failed', e);
     }
 
-    // 2) Try Capacitor Filesystem (native)
+    // 2) Try Capacitor Filesystem (native) - only attempt when running natively
     try {
-      const fs = await import(/* @vite-ignore */ '@capacitor/filesystem');
-      const base64 = await blobToBase64(blob);
-      await fs.Filesystem.writeFile({ path: filename, data: base64, directory: fs.FilesystemDirectory.Documents });
-      // Optionally offer share
-      try {
-        const { Share } = await import(/* @vite-ignore */ '@capacitor/share');
-        await Share.share({ title: filename, text: 'Timesheet PDF', url: filename });
-      } catch (err) {
-        // ignore
+      if (window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform()) {
+        // Use string concatenation to avoid bundler static analysis
+        const fs = await import('@' + 'capacitor/filesystem');
+        const base64 = await blobToBase64(blob);
+        await fs.Filesystem.writeFile({ path: filename, data: base64, directory: fs.FilesystemDirectory.Documents });
+        // Optionally offer share
+        try {
+          const Share = (await import('@' + 'capacitor/share')).Share;
+          await Share.share({ title: filename, text: 'Timesheet PDF', url: filename });
+        } catch (err) {
+          // ignore
+        }
+        return true;
       }
-      return true;
     } catch (e) {
       console.warn('Capacitor Filesystem not available or failed', e);
     }
@@ -857,22 +866,61 @@ export default function TimesheetLogger() {
           </div>
 
           {/* Export Button */}
-          <div className="space-y-3 mb-6">
-            <button
-              onClick={generatePDF}
-              className="w-full py-3 bg-green-600 text-white rounded-lg font-semibold hover:bg-green-700 transition flex items-center justify-center gap-2"
-            >
-              <Download size={20} />
-              Export Today's Timesheet
-            </button>
-            <button
-              onClick={generateMonthlyPDF}
-              className="w-full py-3 bg-blue-600 text-white rounded-lg font-semibold hover:bg-blue-700 transition flex items-center justify-center gap-2"
-            >
-              <Download size={20} />
-              Export Month's Timesheets & Job Cards
-            </button>
+          <div className="space-y-3 mb-3">
+            <div className="flex items-start gap-3">
+              <button
+                onClick={generatePDF}
+                className="flex-1 py-3 bg-green-600 text-white rounded-lg font-semibold hover:bg-green-700 transition flex items-center justify-center gap-2"
+              >
+                <Download size={20} />
+                Export Today's Timesheet
+              </button>
+              <button
+                onClick={() => setShowSaveHelp(true)}
+                aria-label="How saving works"
+                title="How saving works"
+                className="p-2 rounded-md bg-white bg-opacity-20 hover:bg-opacity-30 text-white"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="feather feather-help-circle"><circle cx="12" cy="12" r="10"></circle><path d="M9.09 9a3 3 0 1 1 5.82 1c0 2-3 2.5-3 4"></path><line x1="12" y1="17" x2="12" y2="17"></line></svg>
+              </button>
+            </div>
+
+            <div className="flex items-start gap-3">
+              <button
+                onClick={generateMonthlyPDF}
+                className="flex-1 py-3 bg-blue-600 text-white rounded-lg font-semibold hover:bg-blue-700 transition flex items-center justify-center gap-2"
+              >
+                <Download size={20} />
+                Export Month's Timesheets & Job Cards
+              </button>
+              <div className="text-sm text-gray-600 mt-2">Tip: in Chromium-based browsers you may be prompted to choose the save location.</div>
+            </div>
           </div>
+
+          {/* Save help modal */}
+          {showSaveHelp && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-40">
+              <div className="bg-white rounded-lg max-w-lg w-full p-6">
+                <div className="flex items-start justify-between">
+                  <h3 className="text-lg font-semibold">How saving works</h3>
+                  <button onClick={() => setShowSaveHelp(false)} aria-label="Close help" className="text-gray-500 hover:text-gray-700">✕</button>
+                </div>
+                <div className="mt-4 text-sm text-gray-700 space-y-2">
+                  <p>When you export a PDF, the app will try the following (in order):</p>
+                  <ul className="list-disc list-inside">
+                    <li><strong>Desktop Chromium:</strong> you will be prompted to choose a save location (Save File Picker).</li>
+                    <li><strong>Native (Capacitor):</strong> the file is written to the app Documents folder and can be shared.</li>
+                    <li><strong>Fallback:</strong> the browser will start a normal download to your default downloads folder.</li>
+                  </ul>
+                  <p>If your browser does not support choosing a location, check your browser download settings or use a Chromium-based browser that supports the File System Access API.</p>
+                  <p className="mt-2"><strong>Android / Native:</strong> the app will request location permission when you attempt to capture location — please allow it. The app writes exported PDFs to the app's Documents folder by default (no extra permission required). If you want the file in Downloads or external storage, use the system Share / Export action or grant the app access in system settings (some Android versions may require additional storage permissions).</p>
+                </div>
+                <div className="mt-4 text-right">
+                  <button onClick={() => setShowSaveHelp(false)} className="px-4 py-2 bg-indigo-600 text-white rounded">Got it</button>
+                </div>
+              </div>
+            </div>
+          )}
 
           {/* Today's Jobs */}
           <div>
