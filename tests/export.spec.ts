@@ -4,7 +4,7 @@ import { test, expect } from '@playwright/test';
 test('export month generates a PDF download', async ({ page }) => {
   // Pre-set login so the test doesn't need to interact with the welcome screen
   await page.addInitScript(() => localStorage.setItem('technicianName', 'Tester'));
-  await page.goto('http://localhost:5173/');
+  await page.goto('/');
 
   // Wait for app to be ready and confirm login
   await page.waitForSelector('text=Technician:', { timeout: 30000 });
@@ -22,6 +22,11 @@ test('export month generates a PDF download', async ({ page }) => {
   await page.click('button:has-text("Start Job")');
   await page.fill('textarea[placeholder="What was done to resolve the issue?"]', 'Done');
   await page.click('button:has-text("End Job")');
+
+  // Verify help modal opens and shows save info
+  await page.click('button[title="How saving works"]');
+  await expect(page.locator('text=When you export a PDF')).toBeVisible();
+  await page.click('button:has-text("Got it")');
 
   // Click Export Month and wait for download
   const [download] = await Promise.all([
