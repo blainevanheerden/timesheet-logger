@@ -27,6 +27,8 @@ jobs:
       - name: Install Playwright browsers
         run: npx playwright install --with-deps
       - name: Run Playwright tests
+        env:
+          SERVER_API_KEY: dev-key
         run: npx playwright test --reporter=list
 
   android-debug-apk:
