@@ -23,7 +23,7 @@ jobs:
       - name: Build
         run: npm run build
       - name: Smoke test dist
-        run: sh ./scripts/smoke-test.sh dist
+        run: bash ./scripts/smoke-test.sh dist
       - name: Install Playwright browsers
         run: npx playwright install --with-deps
       - name: Run Playwright tests
