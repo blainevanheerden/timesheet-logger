@@ -487,9 +487,12 @@ export default function TimesheetLogger() {
   });
 
   const saveBlobToFile = async (blob, filename) => {
+    console.log('saveBlobToFile called with:', { filename, blobSize: blob.size, blobType: blob.type });
+
     // 1) Try File System Access API (Chromium)
     try {
       if (window.showSaveFilePicker) {
+        console.log('Attempting File System Access API...');
         const opts = {
           suggestedName: filename,
           types: [{ description: 'PDF', accept: { 'application/pdf': ['.pdf'] } }],
@@ -498,6 +501,7 @@ export default function TimesheetLogger() {
         const writable = await handle.createWritable();
         await writable.write(blob);
         await writable.close();
+        console.log('File saved via File System Access API');
         return true;
       }
     } catch (e) {
@@ -507,10 +511,13 @@ export default function TimesheetLogger() {
     // 2) Try Capacitor Filesystem (native) - only attempt when running natively
       try {
       if (window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform()) {
+        console.log('Attempting Capacitor Filesystem...');
         // Use a runtime import via Function to avoid bundler static analysis
         const fs = await new Function('return import("@capacitor/filesystem")')();
         const base64 = await blobToBase64(blob);
+        console.log('Converted to base64, writing file...');
         await fs.Filesystem.writeFile({ path: filename, data: base64, directory: fs.FilesystemDirectory.Documents });
+        console.log('File saved to Documents via Capacitor');
         // Optionally offer share
         try {
           const shareMod = await new Function('return import("@capacitor/share")')();
@@ -528,15 +535,27 @@ export default function TimesheetLogger() {
     }
 
     // 3) Fallback: trigger browser download (no location prompt)
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = filename;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    URL.revokeObjectURL(url);
-    return true;
+    console.log('Using browser download fallback...');
+    try {
+      const url = URL.createObjectURL(blob);
+      console.log('Created blob URL:', url);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      console.log('Clicking anchor to trigger download...');
+      a.click();
+      // Keep a small delay before cleanup to ensure click is processed
+      setTimeout(() => {
+        a.remove();
+        URL.revokeObjectURL(url);
+        console.log('Download cleanup complete');
+      }, 100);
+      return true;
+    } catch (fallbackErr) {
+      console.error('Browser download fallback failed:', fallbackErr);
+      throw new Error(`Could not save file: ${fallbackErr.message}`);
+    }
   };
 
   // Save to Downloads / Share flow: try a native share (so user can save to any location), otherwise fallback to browser download
@@ -775,18 +794,22 @@ export default function TimesheetLogger() {
 
     const filename = `timesheet-month-${now.getFullYear()}-${now.getMonth() + 1}.pdf`;
     const blob = doc.output('blob');
+    console.log('Monthly PDF created:', { filename, blobSize: blob.size, blobType: blob.type, jobCount: monthJobs.length });
     return { blob, filename };
   };
 
   const generateMonthlyPDF = async () => {
     const monthJobs = getJobsByMonth(new Date());
+    console.log('generateMonthlyPDF called with', monthJobs.length, 'jobs');
     if (monthJobs.length === 0) {
       window.alert('No jobs found for this month. Please complete some jobs first.');
       return;
     }
     try {
       const { blob, filename } = await createMonthlyPDFBlob();
+      console.log('About to save blob...');
       await saveBlobToFile(blob, filename);
+      console.log('saveBlobToFile completed successfully');
       window.alert('Monthly PDF generated successfully!');
     } catch (err) {
       console.error('Monthly PDF error', err);
