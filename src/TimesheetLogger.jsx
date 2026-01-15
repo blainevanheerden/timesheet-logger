@@ -436,16 +436,19 @@ export default function TimesheetLogger() {
     }
 
     // 2) Try Capacitor Filesystem (native) - only attempt when running natively
-    try {
+      try {
       if (window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform()) {
-        // Use string concatenation to avoid bundler static analysis
-        const fs = await import('@' + 'capacitor/filesystem');
+        // Use a runtime import via Function to avoid bundler static analysis
+        const fs = await new Function('return import("@capacitor/filesystem")')();
         const base64 = await blobToBase64(blob);
         await fs.Filesystem.writeFile({ path: filename, data: base64, directory: fs.FilesystemDirectory.Documents });
         // Optionally offer share
         try {
-          const Share = (await import('@' + 'capacitor/share')).Share;
-          await Share.share({ title: filename, text: 'Timesheet PDF', url: filename });
+          const shareMod = await new Function('return import("@capacitor/share")')();
+          const Share = shareMod && (shareMod.Share || shareMod.default) ? (shareMod.Share || shareMod.default) : shareMod;
+          if (Share && typeof Share.share === 'function') {
+            await Share.share({ title: filename, text: 'Timesheet PDF', url: filename });
+          }
         } catch (err) {
           // ignore
         }
@@ -465,6 +468,65 @@ export default function TimesheetLogger() {
     a.remove();
     URL.revokeObjectURL(url);
     return true;
+  };
+
+  // Save to Downloads / Share flow: try a native share (so user can save to any location), otherwise fallback to browser download
+  const saveBlobToDownloads = async (blob, filename) => {
+    // Native: write to cache/documents and share
+    try {
+      if (window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform()) {
+      const fs = await new Function('return import("@capacitor/filesystem")')();
+        const base64 = await blobToBase64(blob);
+        // write to temporary cache and then share
+        const tmpPath = `tmp/${Date.now()}-${filename}`;
+        const writeRes = await fs.Filesystem.writeFile({ path: tmpPath, data: base64, directory: fs.FilesystemDirectory.Cache });
+        // Attempt to obtain a reliable file URI (some Capacitor platforms expose getUri)
+        let fileUri = writeRes.uri || writeRes.path || tmpPath;
+        try {
+          if (fs && fs.Filesystem && typeof fs.Filesystem.getUri === 'function') {
+            const uriRes = await fs.Filesystem.getUri({ path: tmpPath, directory: fs.FilesystemDirectory.Cache });
+            fileUri = uriRes.uri || fileUri;
+          }
+        } catch (e) {
+          // ignore
+        }
+        if (fileUri && !fileUri.startsWith('file:')) fileUri = 'file://' + fileUri;
+        try {
+          const ShareMod = await new Function('return import("@capacitor/share")')();
+          const Share = ShareMod && (ShareMod.Share || ShareMod.default) ? (ShareMod.Share || ShareMod.default) : ShareMod;
+          if (Share && typeof Share.share === 'function') {
+            await Share.share({ title: filename, text: 'Timesheet PDF', url: fileUri });
+            return true;
+          }
+          throw new Error('Share API not available');
+        } catch (err) {
+          console.warn('Share failed, falling back to write in Documents', err);
+          // try write to Documents and return
+          await fs.Filesystem.writeFile({ path: filename, data: base64, directory: fs.FilesystemDirectory.Documents });
+          return true;
+        }
+      }
+    } catch (err) {
+      console.warn('Native share/save failed', err);
+    }
+
+    // Web: fallback to download anchor (downloads to default Downloads folder)
+    try {
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      return true;
+    } catch (err) {
+      console.warn('Download fallback failed', err);
+    }
+
+    // last resort: use the existing save behavior which may prompt
+    return saveBlobToFile(blob, filename);
   };
 
   const generatePDF = async () => {
@@ -567,75 +629,91 @@ export default function TimesheetLogger() {
   };
 
   // Generate monthly PDF with overtime summary and job cards
-  const generateMonthlyPDF = async () => {
-    try {
-      const { jsPDF } = await import('jspdf');
-      const doc = new jsPDF();
-      const now = new Date();
-      const month = now.toLocaleString(undefined, { month: 'long', year: 'numeric' });
-      doc.setFontSize(16);
-      doc.text(`MONTHLY TIMESHEET - ${month}`, 10, 14);
+  const createMonthlyPDFBlob = async () => {
+    const { jsPDF } = await import('jspdf');
+    const doc = new jsPDF();
+    const now = new Date();
+    const month = now.toLocaleString(undefined, { month: 'long', year: 'numeric' });
+    doc.setFontSize(16);
+    doc.text(`MONTHLY TIMESHEET - ${month}`, 10, 14);
+    doc.setFontSize(12);
+    let y = 26;
+
+    const monthJobs = jobs.filter(j => {
+      const d = new Date(j.startTime);
+      return d.getMonth() === now.getMonth() && d.getFullYear() === now.getFullYear();
+    });
+
+    const totalOvertime = monthJobs.reduce((sum, j) => sum + parseFloat(j.overtime || 0), 0).toFixed(2);
+
+    doc.text(`Total Overtime: ${totalOvertime} hrs`, 10, y);
+    y += 10;
+
+    doc.text('Overtime Breakdown:', 10, y);
+    y += 8;
+
+    monthJobs.forEach((job, idx) => {
+      if (parseFloat(job.overtime || 0) > 0) {
+        doc.text(`${formatDate(job.startTime)} - ${job.client} - ${job.overtime} hrs (${job.afterHours ? 'After Hours' : 'Normal'})`, 12, y);
+        y += 6;
+        if (y > 270) { doc.addPage(); y = 20; }
+      }
+    });
+
+    // Add job cards
+    doc.addPage();
+    doc.setFontSize(14);
+    doc.text('JOB CARDS', 10, 14);
+    y = 26;
+
+    monthJobs.forEach((job, idx) => {
       doc.setFontSize(12);
-      let y = 26;
-
-      const monthJobs = jobs.filter(j => {
-        const d = new Date(j.startTime);
-        return d.getMonth() === now.getMonth() && d.getFullYear() === now.getFullYear();
-      });
-
-      const totalOvertime = monthJobs.reduce((sum, j) => sum + parseFloat(j.overtime || 0), 0).toFixed(2);
-
-      doc.text(`Total Overtime: ${totalOvertime} hrs`, 10, y);
+      doc.text(`Job ${idx + 1}${job.afterHours ? ' (AFTER HOURS)' : ''}`, 10, y);
+      y += 6;
+      doc.text(`Date: ${formatDate(job.startTime)}`, 12, y);
+      y += 6;
+      doc.text(`Client: ${job.client}`, 12, y);
+      y += 6;
+      doc.text(`Email: ${job.clientEmail || ''}`, 12, y);
+      y += 6;
+      doc.text(`Phone: ${job.clientPhone}`, 12, y);
+      y += 6;
+      doc.text(`Address: ${job.clientAddress}`, 12, y);
+      y += 6;
+      doc.text(`Description: ${job.jobDescription}`, 12, y);
+      y += 6;
+      doc.text(`Resolution: ${job.resolution || ''}`, 12, y);
+      y += 6;
+      doc.text(`Hours: ${job.hoursWorked || ''} Overtime: ${job.overtime || '0.00'}`, 12, y);
       y += 10;
 
-      doc.text('Overtime Breakdown:', 10, y);
-      y += 8;
+      if (y > 270) { doc.addPage(); y = 20; }
+    });
 
-      monthJobs.forEach((job, idx) => {
-        if (parseFloat(job.overtime || 0) > 0) {
-          doc.text(`${formatDate(job.startTime)} - ${job.client} - ${job.overtime} hrs (${job.afterHours ? 'After Hours' : 'Normal'})`, 12, y);
-          y += 6;
-          if (y > 270) { doc.addPage(); y = 20; }
-        }
-      });
+    const filename = `timesheet-month-${now.getFullYear()}-${now.getMonth() + 1}.pdf`;
+    const blob = doc.output('blob');
+    return { blob, filename };
+  };
 
-      // Add job cards
-      doc.addPage();
-      doc.setFontSize(14);
-      doc.text('JOB CARDS', 10, 14);
-      y = 26;
-
-      monthJobs.forEach((job, idx) => {
-        doc.setFontSize(12);
-        doc.text(`Job ${idx + 1}${job.afterHours ? ' (AFTER HOURS)' : ''}`, 10, y);
-        y += 6;
-        doc.text(`Date: ${formatDate(job.startTime)}`, 12, y);
-        y += 6;
-        doc.text(`Client: ${job.client}`, 12, y);
-        y += 6;
-        doc.text(`Email: ${job.clientEmail || ''}`, 12, y);
-        y += 6;
-        doc.text(`Phone: ${job.clientPhone}`, 12, y);
-        y += 6;
-        doc.text(`Address: ${job.clientAddress}`, 12, y);
-        y += 6;
-        doc.text(`Description: ${job.jobDescription}`, 12, y);
-        y += 6;
-        doc.text(`Resolution: ${job.resolution || ''}`, 12, y);
-        y += 6;
-        doc.text(`Hours: ${job.hoursWorked || ''} Overtime: ${job.overtime || '0.00'}`, 12, y);
-        y += 10;
-
-        if (y > 270) { doc.addPage(); y = 20; }
-      });
-
-      const filename = `timesheet-month-${now.getFullYear()}-${now.getMonth() + 1}.pdf`;
-      const blob = doc.output('blob');
+  const generateMonthlyPDF = async () => {
+    try {
+      const { blob, filename } = await createMonthlyPDFBlob();
       await saveBlobToFile(blob, filename);
       window.alert('Monthly PDF generated successfully!');
     } catch (err) {
       console.error('Monthly PDF error', err);
       window.alert('Failed to generate monthly PDF');
+    }
+  };
+
+  const generateMonthlyPDFAndShare = async () => {
+    try {
+      const { blob, filename } = await createMonthlyPDFBlob();
+      await saveBlobToDownloads(blob, filename);
+      window.alert('Monthly PDF shared / downloaded successfully!');
+    } catch (err) {
+      console.error('Monthly PDF share error', err);
+      window.alert('Failed to share/download monthly PDF');
     }
   };
 
@@ -893,8 +971,16 @@ export default function TimesheetLogger() {
                 <Download size={20} />
                 Export Month's Timesheets & Job Cards
               </button>
-              <div className="text-sm text-gray-600 mt-2">Tip: in Chromium-based browsers you may be prompted to choose the save location.</div>
+              <button
+                onClick={generateMonthlyPDFAndShare}
+                className="px-4 py-3 bg-white text-blue-600 rounded-lg border border-blue-200 hover:bg-blue-50 transition flex items-center gap-2"
+                title="Save to Downloads or use system Share"
+              >
+                <Download size={18} />
+                Save to Downloads / Share
+              </button>
             </div>
+            <div className="text-sm text-gray-600 mt-2">Tip: in Chromium-based browsers you may be prompted to choose the save location; on mobile you can use the system Share to save to Downloads.</div>
           </div>
 
           {/* Save help modal */}
@@ -913,7 +999,7 @@ export default function TimesheetLogger() {
                     <li><strong>Fallback:</strong> the browser will start a normal download to your default downloads folder.</li>
                   </ul>
                   <p>If your browser does not support choosing a location, check your browser download settings or use a Chromium-based browser that supports the File System Access API.</p>
-                  <p className="mt-2"><strong>Android / Native:</strong> the app will request location permission when you attempt to capture location — please allow it. The app writes exported PDFs to the app's Documents folder by default (no extra permission required). If you want the file in Downloads or external storage, use the system Share / Export action or grant the app access in system settings (some Android versions may require additional storage permissions).</p>
+                  <p className="mt-2"><strong>Android / Native:</strong> the app will request location permission when you attempt to capture location — please allow it. When available, the <strong>Save to Downloads / Share</strong> button will open the system share dialog allowing you to save or send the file (no browser download). The app writes exported PDFs to the app's Documents folder by default (no extra permission required). On some Android versions additional storage permissions may be required to save files to shared directories.</p>
                 </div>
                 <div className="mt-4 text-right">
                   <button onClick={() => setShowSaveHelp(false)} className="px-4 py-2 bg-indigo-600 text-white rounded">Got it</button>
