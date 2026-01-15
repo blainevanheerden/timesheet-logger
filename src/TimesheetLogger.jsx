@@ -489,10 +489,37 @@ export default function TimesheetLogger() {
   const saveBlobToFile = async (blob, filename) => {
     console.log('saveBlobToFile called with:', { filename, blobSize: blob.size, blobType: blob.type });
 
-    // 1) Try File System Access API (Chromium)
+    // Check if running on native platform first
+    const isNative = window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform();
+    console.log('Is Native Platform:', isNative);
+
+    // 1) On Native (Android): Use Capacitor Filesystem to save directly to Documents
+    if (isNative) {
+      try {
+        console.log('Attempting to save via Capacitor Filesystem to Documents...');
+        const fs = await new Function('return import("@capacitor/filesystem")')();
+        const base64 = await blobToBase64(blob);
+        console.log('Converted blob to base64, size:', base64.length);
+        
+        const result = await fs.Filesystem.writeFile({
+          path: filename,
+          data: base64,
+          directory: fs.FilesystemDirectory.Documents,
+          recursive: true
+        });
+        console.log('File saved successfully via Capacitor:', result);
+        window.alert(`PDF saved to Documents folder: ${filename}`);
+        return true;
+      } catch (e) {
+        console.error('Capacitor Filesystem save failed:', e);
+        throw new Error(`Failed to save to device: ${e.message}`);
+      }
+    }
+
+    // 2) On Web: Try File System Access API (Chromium)
     try {
       if (window.showSaveFilePicker) {
-        console.log('Attempting File System Access API...');
+        console.log('Attempting File System Access API (web save picker)...');
         const opts = {
           suggestedName: filename,
           types: [{ description: 'PDF', accept: { 'application/pdf': ['.pdf'] } }],
@@ -508,33 +535,7 @@ export default function TimesheetLogger() {
       console.warn('File System Access API not available or failed', e);
     }
 
-    // 2) Try Capacitor Filesystem (native) - only attempt when running natively
-      try {
-      if (window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform()) {
-        console.log('Attempting Capacitor Filesystem...');
-        // Use a runtime import via Function to avoid bundler static analysis
-        const fs = await new Function('return import("@capacitor/filesystem")')();
-        const base64 = await blobToBase64(blob);
-        console.log('Converted to base64, writing file...');
-        await fs.Filesystem.writeFile({ path: filename, data: base64, directory: fs.FilesystemDirectory.Documents });
-        console.log('File saved to Documents via Capacitor');
-        // Optionally offer share
-        try {
-          const shareMod = await new Function('return import("@capacitor/share")')();
-          const Share = shareMod && (shareMod.Share || shareMod.default) ? (shareMod.Share || shareMod.default) : shareMod;
-          if (Share && typeof Share.share === 'function') {
-            await Share.share({ title: filename, text: 'Timesheet PDF', url: filename });
-          }
-        } catch (err) {
-          // ignore
-        }
-        return true;
-      }
-    } catch (e) {
-      console.warn('Capacitor Filesystem not available or failed', e);
-    }
-
-    // 3) Fallback: trigger browser download (no location prompt)
+    // 3) Fallback: trigger browser download 
     console.log('Using browser download fallback...');
     try {
       const url = URL.createObjectURL(blob);
@@ -558,15 +559,27 @@ export default function TimesheetLogger() {
     }
   };
 
-  // Save to Downloads / Share flow: try a native share (so user can save to any location), otherwise fallback to browser download
+  // Save to Downloads / Share flow: On native, save to Documents then optionally share
   const saveBlobToDownloads = async (blob, filename) => {
-    // Native: write to cache/documents and share, plus backup to app data folder
-    try {
-      if (window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform()) {
-      const fs = await new Function('return import("@capacitor/filesystem")')();
+    console.log('saveBlobToDownloads called with:', { filename, blobSize: blob.size });
+
+    // Native: Save directly to Documents, then offer to share
+    if (window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform()) {
+      try {
+        console.log('Native platform detected, saving to Documents...');
+        const fs = await new Function('return import("@capacitor/filesystem")')();
         const base64 = await blobToBase64(blob);
+        console.log('Converted to base64');
         
-        // Also save a backup copy to the app data exports folder
+        // Save to Documents
+        const saveResult = await fs.Filesystem.writeFile({ 
+          path: filename, 
+          data: base64, 
+          directory: fs.FilesystemDirectory.Documents 
+        });
+        console.log('File saved to Documents:', saveResult);
+        
+        // Also save backup to app data folder
         try {
           const backupPath = `TimeSheetLogger/exports/${filename}`;
           await fs.Filesystem.writeFile({ 
@@ -579,40 +592,53 @@ export default function TimesheetLogger() {
           console.warn('Failed to save backup copy:', backupErr);
         }
         
-        // write to temporary cache and then share
-        const tmpPath = `tmp/${Date.now()}-${filename}`;
-        const writeRes = await fs.Filesystem.writeFile({ path: tmpPath, data: base64, directory: fs.FilesystemDirectory.Cache });
-        // Attempt to obtain a reliable file URI (some Capacitor platforms expose getUri)
-        let fileUri = writeRes.uri || writeRes.path || tmpPath;
+        // Now attempt to share
         try {
-          if (fs && fs.Filesystem && typeof fs.Filesystem.getUri === 'function') {
-            const uriRes = await fs.Filesystem.getUri({ path: tmpPath, directory: fs.FilesystemDirectory.Cache });
-            fileUri = uriRes.uri || fileUri;
-          }
-        } catch (e) {
-          // ignore
-        }
-        if (fileUri && !fileUri.startsWith('file:')) fileUri = 'file://' + fileUri;
-        try {
+          console.log('Attempting to share file...');
           const ShareMod = await new Function('return import("@capacitor/share")')();
           const Share = ShareMod && (ShareMod.Share || ShareMod.default) ? (ShareMod.Share || ShareMod.default) : ShareMod;
+          
           if (Share && typeof Share.share === 'function') {
-            await Share.share({ title: filename, text: 'Timesheet PDF', url: fileUri });
+            // Try to get file URI
+            let fileUri = saveResult.uri || `file://${saveResult.path}`;
+            
+            // Try to get proper URI from Capacitor if available
+            try {
+              if (fs.Filesystem && typeof fs.Filesystem.getUri === 'function') {
+                const uriRes = await fs.Filesystem.getUri({ 
+                  path: filename, 
+                  directory: fs.FilesystemDirectory.Documents 
+                });
+                fileUri = uriRes.uri || fileUri;
+                console.log('Got URI from Capacitor:', fileUri);
+              }
+            } catch (e) {
+              console.warn('Could not get URI from Capacitor, using fallback:', e);
+            }
+            
+            console.log('Sharing with URI:', fileUri);
+            await Share.share({ 
+              title: filename, 
+              text: 'Timesheet PDF exported', 
+              url: fileUri 
+            });
+            console.log('Share dialog opened');
+            window.alert(`PDF saved to Documents and share dialog opened. File: ${filename}`);
             return true;
           }
-          throw new Error('Share API not available');
-        } catch (err) {
-          console.warn('Share failed, falling back to write in Documents', err);
-          // try write to Documents and return
-          await fs.Filesystem.writeFile({ path: filename, data: base64, directory: fs.FilesystemDirectory.Documents });
+        } catch (shareErr) {
+          console.warn('Share failed, but file was already saved:', shareErr);
+          window.alert(`PDF saved to Documents folder: ${filename}`);
           return true;
         }
+      } catch (err) {
+        console.error('Native save failed:', err);
+        throw new Error(`Failed to save to device: ${err.message}`);
       }
-    } catch (err) {
-      console.warn('Native share/save failed', err);
     }
 
-    // Web: fallback to download anchor (downloads to default Downloads folder)
+    // Web: fallback to download anchor
+    console.log('Web platform detected, using browser download...');
     try {
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
@@ -620,15 +646,15 @@ export default function TimesheetLogger() {
       a.download = filename;
       document.body.appendChild(a);
       a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
+      setTimeout(() => {
+        a.remove();
+        URL.revokeObjectURL(url);
+      }, 100);
       return true;
     } catch (err) {
-      console.warn('Download fallback failed', err);
+      console.error('Download fallback failed:', err);
+      throw new Error(`Could not download file: ${err.message}`);
     }
-
-    // last resort: use the existing save behavior which may prompt
-    return saveBlobToFile(blob, filename);
   };
 
   const generatePDF = async () => {
