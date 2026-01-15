@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Clock, MapPin, Users, FileText, Calendar, Download, Play, Square } from 'lucide-react';
+import { Clock, MapPin, Users, FileText, Calendar, Download, Play, Square, History, ChevronLeft, ChevronRight } from 'lucide-react';
 
 export default function TimesheetLogger() {
   const [technicianName, setTechnicianName] = useState('');
@@ -18,6 +18,8 @@ export default function TimesheetLogger() {
   const [resolution, setResolution] = useState('');
   const [location, setLocation] = useState('');
   const [showSaveHelp, setShowSaveHelp] = useState(false);
+  const [viewMode, setViewMode] = useState('today'); // 'today' or 'history'
+  const [historyDate, setHistoryDate] = useState(new Date());
 
   useEffect(() => {
     const storedTechnician = localStorage.getItem('technicianName');
@@ -122,6 +124,59 @@ export default function TimesheetLogger() {
       return null;
     }
   };
+
+  // Initialize app data folder structure on native platforms
+  const initializeAppDataFolder = async () => {
+    try {
+      if (window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform()) {
+        const fs = await new Function('return import("@capacitor/filesystem")')();
+        const appDataPath = 'TimeSheetLogger';
+        
+        // Create main app data folder
+        try {
+          await fs.Filesystem.mkdir({
+            path: appDataPath,
+            directory: fs.FilesystemDirectory.Documents,
+            recursive: true
+          });
+        } catch (e) {
+          // Folder may already exist, which is fine
+        }
+
+        // Create subfolders for different data types
+        const subfolders = ['exports', 'backups', 'archive'];
+        for (const subfolder of subfolders) {
+          try {
+            await fs.Filesystem.mkdir({
+              path: `${appDataPath}/${subfolder}`,
+              directory: fs.FilesystemDirectory.Documents,
+              recursive: true
+            });
+          } catch (e) {
+            // Folder may already exist
+          }
+        }
+
+        console.log('App data folder initialized at Documents/TimeSheetLogger');
+        return appDataPath;
+      }
+    } catch (e) {
+      console.warn('Failed to initialize app data folder:', e);
+    }
+    return null;
+  };
+
+  // Initialize app data folder on first load
+  useEffect(() => {
+    const initFolder = async () => {
+      const result = localStorage.getItem('appDataFolderInitialized');
+      if (!result) {
+        await initializeAppDataFolder();
+        localStorage.setItem('appDataFolderInitialized', 'true');
+      }
+    };
+    initFolder();
+  }, []);
 
   const handleLogin = () => {
     if (!loginInput.trim()) {
@@ -343,6 +398,20 @@ export default function TimesheetLogger() {
     return jobs.filter(j => new Date(j.startTime).toDateString() === today);
   };
 
+  const getJobsByDate = (date) => {
+    const dateStr = date.toDateString();
+    return jobs.filter(j => new Date(j.startTime).toDateString() === dateStr);
+  };
+
+  const getJobsByMonth = (date) => {
+    const month = date.getMonth();
+    const year = date.getFullYear();
+    return jobs.filter(j => {
+      const d = new Date(j.startTime);
+      return d.getMonth() === month && d.getFullYear() === year;
+    });
+  };
+
   const getMonthlyOvertime = () => {
     const now = new Date();
     const currentMonth = now.getMonth();
@@ -472,11 +541,25 @@ export default function TimesheetLogger() {
 
   // Save to Downloads / Share flow: try a native share (so user can save to any location), otherwise fallback to browser download
   const saveBlobToDownloads = async (blob, filename) => {
-    // Native: write to cache/documents and share
+    // Native: write to cache/documents and share, plus backup to app data folder
     try {
       if (window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform()) {
       const fs = await new Function('return import("@capacitor/filesystem")')();
         const base64 = await blobToBase64(blob);
+        
+        // Also save a backup copy to the app data exports folder
+        try {
+          const backupPath = `TimeSheetLogger/exports/${filename}`;
+          await fs.Filesystem.writeFile({ 
+            path: backupPath, 
+            data: base64, 
+            directory: fs.FilesystemDirectory.Documents 
+          });
+          console.log('Backup copy saved to app data folder');
+        } catch (backupErr) {
+          console.warn('Failed to save backup copy:', backupErr);
+        }
+        
         // write to temporary cache and then share
         const tmpPath = `tmp/${Date.now()}-${filename}`;
         const writeRes = await fs.Filesystem.writeFile({ path: tmpPath, data: base64, directory: fs.FilesystemDirectory.Cache });
@@ -696,24 +779,34 @@ export default function TimesheetLogger() {
   };
 
   const generateMonthlyPDF = async () => {
+    const monthJobs = getJobsByMonth(new Date());
+    if (monthJobs.length === 0) {
+      window.alert('No jobs found for this month. Please complete some jobs first.');
+      return;
+    }
     try {
       const { blob, filename } = await createMonthlyPDFBlob();
       await saveBlobToFile(blob, filename);
       window.alert('Monthly PDF generated successfully!');
     } catch (err) {
       console.error('Monthly PDF error', err);
-      window.alert('Failed to generate monthly PDF');
+      window.alert(`Failed to generate monthly PDF: ${err.message}`);
     }
   };
 
   const generateMonthlyPDFAndShare = async () => {
+    const monthJobs = getJobsByMonth(new Date());
+    if (monthJobs.length === 0) {
+      window.alert('No jobs found for this month. Please complete some jobs first.');
+      return;
+    }
     try {
       const { blob, filename } = await createMonthlyPDFBlob();
       await saveBlobToDownloads(blob, filename);
       window.alert('Monthly PDF shared / downloaded successfully!');
     } catch (err) {
       console.error('Monthly PDF share error', err);
-      window.alert('Failed to share/download monthly PDF');
+      window.alert(`Failed to share/download monthly PDF: ${err.message}`);
     }
   };
 
@@ -1008,70 +1101,189 @@ export default function TimesheetLogger() {
             </div>
           )}
 
-          {/* Today's Jobs */}
+          {/* Job View Toggle and Display */}
           <div>
-            <h3 className="text-xl font-semibold text-gray-800 mb-4">Today's Jobs</h3>
-            {getTodayJobs().length === 0 ? (
-              <p className="text-gray-500 text-center py-8">No jobs completed today</p>
-            ) : (
-              <div className="space-y-3">
-                {getTodayJobs().map((job) => (
-                  <div key={job.id} className="bg-gray-50 rounded-lg p-4 border border-gray-200">
-                    <div className="flex justify-between items-start mb-2">
-                      <div className="flex items-center gap-2">
-                        <Users className="text-indigo-600" size={18} />
-                        <span className="font-semibold text-gray-800">{job.client}</span>
-                        {job.afterHours && (
-                          <span className="text-xs bg-amber-100 text-amber-700 px-2 py-1 rounded-full font-semibold">
-                            After Hours
-                          </span>
-                        )}
+            <div className="flex items-center gap-3 mb-4">
+              <button
+                onClick={() => setViewMode('today')}
+                className={`px-4 py-2 rounded-lg font-semibold transition flex items-center gap-2 ${
+                  viewMode === 'today'
+                    ? 'bg-indigo-600 text-white'
+                    : 'bg-gray-200 text-gray-800 hover:bg-gray-300'
+                }`}
+              >
+                <Clock size={18} />
+                Today
+              </button>
+              <button
+                onClick={() => setViewMode('history')}
+                className={`px-4 py-2 rounded-lg font-semibold transition flex items-center gap-2 ${
+                  viewMode === 'history'
+                    ? 'bg-indigo-600 text-white'
+                    : 'bg-gray-200 text-gray-800 hover:bg-gray-300'
+                }`}
+              >
+                <History size={18} />
+                History
+              </button>
+            </div>
+
+            {viewMode === 'today' ? (
+              <div>
+                <h3 className="text-xl font-semibold text-gray-800 mb-4">Today's Jobs</h3>
+                {getTodayJobs().length === 0 ? (
+                  <p className="text-gray-500 text-center py-8">No jobs completed today</p>
+                ) : (
+                  <div className="space-y-3">
+                    {getTodayJobs().map((job) => (
+                      <div key={job.id} className="bg-gray-50 rounded-lg p-4 border border-gray-200">
+                        <div className="flex justify-between items-start mb-2">
+                          <div className="flex items-center gap-2">
+                            <Users className="text-indigo-600" size={18} />
+                            <span className="font-semibold text-gray-800">{job.client}</span>
+                            {job.afterHours && (
+                              <span className="text-xs bg-amber-100 text-amber-700 px-2 py-1 rounded-full font-semibold">
+                                After Hours
+                              </span>
+                            )}
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <span className="text-sm text-gray-500">{formatDate(job.startTime)}</span>
+                            <button
+                              onClick={() => deleteJob(job.id)}
+                              className="text-sm text-red-600 font-semibold ml-3 hover:underline"
+                            >
+                              Delete
+                            </button>
+                          </div>
+                        </div>
+                        <div className="text-sm mb-2">
+                          <p className="text-gray-600">📞 {job.clientPhone}</p>
+                          <p className="text-gray-600">📍 {job.clientAddress}</p>
+                        </div>
+                        <div className="bg-blue-50 p-3 rounded mb-2 text-sm">
+                          <p className="font-semibold text-gray-700 mb-1">Job Description:</p>
+                          <p className="text-gray-600">{job.jobDescription}</p>
+                        </div>
+                        <div className="bg-green-50 p-3 rounded mb-2 text-sm">
+                          <p className="font-semibold text-gray-700 mb-1">Resolution:</p>
+                          <p className="text-gray-600">{job.resolution}</p>
+                        </div>
+                        <div className="grid grid-cols-2 gap-2 text-sm mb-2">
+                          <div>
+                            <span className="text-gray-600">Start:</span> {formatTime(job.startTime)}
+                          </div>
+                          <div>
+                            <span className="text-gray-600">End:</span> {formatTime(job.endTime)}
+                          </div>
+                          <div>
+                            <span className="text-gray-600">Hours:</span> {job.hoursWorked}
+                          </div>
+                          <div className="text-amber-600 font-semibold">
+                            <span className="text-gray-600">OT:</span> {job.overtime}
+                          </div>
+                        </div>
+                        <div className="text-xs text-gray-500 mb-1 flex items-center gap-1">
+                          <MapPin size={12} />
+                          {job.location}
+                        </div>
+                        <div className="text-sm text-indigo-600 font-semibold border-t pt-2">
+                          👤 Technician: {job.technician}
+                        </div>
                       </div>
-                      <div className="flex items-center gap-2">
-                        <span className="text-sm text-gray-500">{formatDate(job.startTime)}</span>
-                        <button
-                          onClick={() => deleteJob(job.id)}
-                          className="text-sm text-red-600 font-semibold ml-3 hover:underline"
-                        >
-                          Delete
-                        </button>
-                      </div>
-                    </div>
-                    <div className="text-sm mb-2">
-                      <p className="text-gray-600">📞 {job.clientPhone}</p>
-                      <p className="text-gray-600">📍 {job.clientAddress}</p>
-                    </div>
-                    <div className="bg-blue-50 p-3 rounded mb-2 text-sm">
-                      <p className="font-semibold text-gray-700 mb-1">Job Description:</p>
-                      <p className="text-gray-600">{job.jobDescription}</p>
-                    </div>
-                    <div className="bg-green-50 p-3 rounded mb-2 text-sm">
-                      <p className="font-semibold text-gray-700 mb-1">Resolution:</p>
-                      <p className="text-gray-600">{job.resolution}</p>
-                    </div>
-                    <div className="grid grid-cols-2 gap-2 text-sm mb-2">
-                      <div>
-                        <span className="text-gray-600">Start:</span> {formatTime(job.startTime)}
-                      </div>
-                      <div>
-                        <span className="text-gray-600">End:</span> {formatTime(job.endTime)}
-                      </div>
-                      <div>
-                        <span className="text-gray-600">Hours:</span> {job.hoursWorked}
-                      </div>
-                      <div className="text-amber-600 font-semibold">
-                        <span className="text-gray-600">OT:</span> {job.overtime}
-                      </div>
-                    </div>
-                    <div className="text-xs text-gray-500 mb-1 flex items-center gap-1">
-                      <MapPin size={12} />
-                      {job.location}
-                    </div>
-                    <div className="text-sm text-indigo-600 font-semibold border-t pt-2">
-                      👤 Technician: {job.technician}
-                    </div>
+                    ))}
                   </div>
-                ))}
+                )}
+              </div>
+            ) : (
+              <div>
+                <h3 className="text-xl font-semibold text-gray-800 mb-4">Job History</h3>
+                
+                {/* Date Navigation */}
+                <div className="flex items-center justify-between mb-4 bg-white p-3 rounded-lg border border-gray-200">
+                  <button
+                    onClick={() => setHistoryDate(new Date(historyDate.getTime() - 24 * 60 * 60 * 1000))}
+                    className="p-2 hover:bg-gray-100 rounded-lg transition"
+                  >
+                    <ChevronLeft size={20} className="text-gray-600" />
+                  </button>
+                  <div className="text-center">
+                    <p className="text-sm text-gray-600">Viewing:</p>
+                    <p className="text-lg font-semibold text-gray-800">{formatDate(historyDate)}</p>
+                  </div>
+                  <button
+                    onClick={() => setHistoryDate(new Date(historyDate.getTime() + 24 * 60 * 60 * 1000))}
+                    className="p-2 hover:bg-gray-100 rounded-lg transition"
+                  >
+                    <ChevronRight size={20} className="text-gray-600" />
+                  </button>
+                </div>
+
+                {/* History Jobs Display */}
+                {getJobsByDate(historyDate).length === 0 ? (
+                  <p className="text-gray-500 text-center py-8">No jobs found for {formatDate(historyDate)}</p>
+                ) : (
+                  <div className="space-y-3">
+                    {getJobsByDate(historyDate).map((job) => (
+                      <div key={job.id} className="bg-gray-50 rounded-lg p-4 border border-gray-200">
+                        <div className="flex justify-between items-start mb-2">
+                          <div className="flex items-center gap-2">
+                            <Users className="text-indigo-600" size={18} />
+                            <span className="font-semibold text-gray-800">{job.client}</span>
+                            {job.afterHours && (
+                              <span className="text-xs bg-amber-100 text-amber-700 px-2 py-1 rounded-full font-semibold">
+                                After Hours
+                              </span>
+                            )}
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <span className="text-sm text-gray-500">{formatDate(job.startTime)}</span>
+                            <button
+                              onClick={() => deleteJob(job.id)}
+                              className="text-sm text-red-600 font-semibold ml-3 hover:underline"
+                            >
+                              Delete
+                            </button>
+                          </div>
+                        </div>
+                        <div className="text-sm mb-2">
+                          <p className="text-gray-600">📞 {job.clientPhone}</p>
+                          <p className="text-gray-600">📧 {job.clientEmail || 'No email'}</p>
+                          <p className="text-gray-600">📍 {job.clientAddress}</p>
+                        </div>
+                        <div className="bg-blue-50 p-3 rounded mb-2 text-sm">
+                          <p className="font-semibold text-gray-700 mb-1">Job Description:</p>
+                          <p className="text-gray-600">{job.jobDescription}</p>
+                        </div>
+                        <div className="bg-green-50 p-3 rounded mb-2 text-sm">
+                          <p className="font-semibold text-gray-700 mb-1">Resolution:</p>
+                          <p className="text-gray-600">{job.resolution}</p>
+                        </div>
+                        <div className="grid grid-cols-2 gap-2 text-sm mb-2">
+                          <div>
+                            <span className="text-gray-600">Start:</span> {formatTime(job.startTime)}
+                          </div>
+                          <div>
+                            <span className="text-gray-600">End:</span> {formatTime(job.endTime)}
+                          </div>
+                          <div>
+                            <span className="text-gray-600">Hours:</span> {job.hoursWorked}
+                          </div>
+                          <div className="text-amber-600 font-semibold">
+                            <span className="text-gray-600">OT:</span> {job.overtime}
+                          </div>
+                        </div>
+                        <div className="text-xs text-gray-500 mb-1 flex items-center gap-1">
+                          <MapPin size={12} />
+                          {job.location}
+                        </div>
+                        <div className="text-sm text-indigo-600 font-semibold border-t pt-2">
+                          👤 Technician: {job.technician}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
             )}
           </div>
