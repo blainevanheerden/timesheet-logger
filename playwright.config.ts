@@ -7,7 +7,7 @@ export default defineConfig({
   globalTeardown: './tests/global-teardown.js',
   use: {
     headless: true,
-    baseURL: 'http://localhost:5173',
+    baseURL: process.env.PLAYWRIGHT_BASE_URL || 'http://localhost:5173',
   },
   webServer: {
     command: 'npm run dev',

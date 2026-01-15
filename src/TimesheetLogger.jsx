@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Clock, MapPin, Users, FileText, Calendar, Download, Play, Square } from 'lucide-react';
+import { Clock, MapPin, Users, FileText, Calendar, Download, Play, Square, History, ChevronLeft, ChevronRight } from 'lucide-react';
 
 export default function TimesheetLogger() {
   const [technicianName, setTechnicianName] = useState('');
@@ -13,9 +13,13 @@ export default function TimesheetLogger() {
   const [client, setClient] = useState('');
   const [clientPhone, setClientPhone] = useState('');
   const [clientAddress, setClientAddress] = useState('');
+  const [clientEmail, setClientEmail] = useState('');
   const [jobDescription, setJobDescription] = useState('');
   const [resolution, setResolution] = useState('');
   const [location, setLocation] = useState('');
+  const [showSaveHelp, setShowSaveHelp] = useState(false);
+  const [viewMode, setViewMode] = useState('today'); // 'today' or 'history'
+  const [historyDate, setHistoryDate] = useState(new Date());
 
   useEffect(() => {
     const storedTechnician = localStorage.getItem('technicianName');
@@ -64,6 +68,10 @@ export default function TimesheetLogger() {
         try {
           const { Geolocation } = await import('@capacitor/geolocation');
           setLocation('Requesting native location...');
+          // Request runtime permissions explicitly when available (some Capacitor versions provide requestPermissions)
+          if (typeof Geolocation.requestPermissions === 'function') {
+            try { await Geolocation.requestPermissions(); } catch(e) { console.warn('requestPermissions failed', e); }
+          }
           const pos = await Geolocation.getCurrentPosition({ enableHighAccuracy: true, timeout: 15000 });
           const loc = `${pos.coords.latitude.toFixed(4)}, ${pos.coords.longitude.toFixed(4)}`;
           setLocation(loc);
@@ -116,6 +124,59 @@ export default function TimesheetLogger() {
       return null;
     }
   };
+
+  // Initialize app data folder structure on native platforms
+  const initializeAppDataFolder = async () => {
+    try {
+      if (window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform()) {
+        const fs = await new Function('return import("@capacitor/filesystem")')();
+        const appDataPath = 'TimeSheetLogger';
+        
+        // Create main app data folder
+        try {
+          await fs.Filesystem.mkdir({
+            path: appDataPath,
+            directory: fs.FilesystemDirectory.Documents,
+            recursive: true
+          });
+        } catch (e) {
+          // Folder may already exist, which is fine
+        }
+
+        // Create subfolders for different data types
+        const subfolders = ['exports', 'backups', 'archive'];
+        for (const subfolder of subfolders) {
+          try {
+            await fs.Filesystem.mkdir({
+              path: `${appDataPath}/${subfolder}`,
+              directory: fs.FilesystemDirectory.Documents,
+              recursive: true
+            });
+          } catch (e) {
+            // Folder may already exist
+          }
+        }
+
+        console.log('App data folder initialized at Documents/TimeSheetLogger');
+        return appDataPath;
+      }
+    } catch (e) {
+      console.warn('Failed to initialize app data folder:', e);
+    }
+    return null;
+  };
+
+  // Initialize app data folder on first load
+  useEffect(() => {
+    const initFolder = async () => {
+      const result = localStorage.getItem('appDataFolderInitialized');
+      if (!result) {
+        await initializeAppDataFolder();
+        localStorage.setItem('appDataFolderInitialized', 'true');
+      }
+    };
+    initFolder();
+  }, []);
 
   const handleLogin = () => {
     if (!loginInput.trim()) {
@@ -203,8 +264,8 @@ export default function TimesheetLogger() {
   };
 
   const startJob = () => {
-    if (!client || !clientPhone || !clientAddress || !jobDescription) {
-      window.alert('Please enter all client details and job description');
+    if (!client || !clientPhone || !clientAddress || !clientEmail || !jobDescription) {
+      window.alert('Please enter all client details (including email) and job description');
       return;
     }
     if (!dailySession) {
@@ -217,6 +278,7 @@ export default function TimesheetLogger() {
       client,
       clientPhone,
       clientAddress,
+      clientEmail,
       jobDescription,
       technician: technicianName,
       startTime: new Date().toISOString(),
@@ -258,6 +320,8 @@ export default function TimesheetLogger() {
     setActiveJob(null);
     setClient('');
     setClientPhone('');
+    setClientEmail('');
+    setClientAddress('');
     setClientAddress('');
     setJobDescription('');
     setResolution('');
@@ -334,6 +398,20 @@ export default function TimesheetLogger() {
     return jobs.filter(j => new Date(j.startTime).toDateString() === today);
   };
 
+  const getJobsByDate = (date) => {
+    const dateStr = date.toDateString();
+    return jobs.filter(j => new Date(j.startTime).toDateString() === dateStr);
+  };
+
+  const getJobsByMonth = (date) => {
+    const month = date.getMonth();
+    const year = date.getFullYear();
+    return jobs.filter(j => {
+      const d = new Date(j.startTime);
+      return d.getMonth() === month && d.getFullYear() === year;
+    });
+  };
+
   const getMonthlyOvertime = () => {
     const now = new Date();
     const currentMonth = now.getMonth();
@@ -399,6 +477,185 @@ export default function TimesheetLogger() {
     window.addEventListener('online', onOnline);
     return () => window.removeEventListener('online', onOnline);
   }, [jobs]);
+
+  // Helper to convert a blob to base64
+  const blobToBase64 = (blob) => new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onloadend = () => resolve(reader.result.split(',')[1]);
+    reader.onerror = reject;
+    reader.readAsDataURL(blob);
+  });
+
+  const saveBlobToFile = async (blob, filename) => {
+    console.log('saveBlobToFile called with:', { filename, blobSize: blob.size, blobType: blob.type });
+
+    // Check if running on native platform first
+    const isNative = window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform();
+    console.log('Is Native Platform:', isNative);
+
+    // 1) On Native (Android): Use Capacitor Filesystem to save directly to Documents
+    if (isNative) {
+      try {
+        console.log('Attempting to save via Capacitor Filesystem to Documents...');
+        const fs = await new Function('return import("@capacitor/filesystem")')();
+        const base64 = await blobToBase64(blob);
+        console.log('Converted blob to base64, size:', base64.length);
+        
+        const result = await fs.Filesystem.writeFile({
+          path: filename,
+          data: base64,
+          directory: fs.FilesystemDirectory.Documents,
+          recursive: true
+        });
+        console.log('File saved successfully via Capacitor:', result);
+        window.alert(`PDF saved to Documents folder: ${filename}`);
+        return true;
+      } catch (e) {
+        console.error('Capacitor Filesystem save failed:', e);
+        throw new Error(`Failed to save to device: ${e.message}`);
+      }
+    }
+
+    // 2) On Web: Try File System Access API (Chromium)
+    try {
+      if (window.showSaveFilePicker) {
+        console.log('Attempting File System Access API (web save picker)...');
+        const opts = {
+          suggestedName: filename,
+          types: [{ description: 'PDF', accept: { 'application/pdf': ['.pdf'] } }],
+        };
+        const handle = await window.showSaveFilePicker(opts);
+        const writable = await handle.createWritable();
+        await writable.write(blob);
+        await writable.close();
+        console.log('File saved via File System Access API');
+        return true;
+      }
+    } catch (e) {
+      console.warn('File System Access API not available or failed', e);
+    }
+
+    // 3) Fallback: trigger browser download 
+    console.log('Using browser download fallback...');
+    try {
+      const url = URL.createObjectURL(blob);
+      console.log('Created blob URL:', url);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      console.log('Clicking anchor to trigger download...');
+      a.click();
+      // Keep a small delay before cleanup to ensure click is processed
+      setTimeout(() => {
+        a.remove();
+        URL.revokeObjectURL(url);
+        console.log('Download cleanup complete');
+      }, 100);
+      return true;
+    } catch (fallbackErr) {
+      console.error('Browser download fallback failed:', fallbackErr);
+      throw new Error(`Could not save file: ${fallbackErr.message}`);
+    }
+  };
+
+  // Save to Downloads / Share flow: On native, save to Documents then optionally share
+  const saveBlobToDownloads = async (blob, filename) => {
+    console.log('saveBlobToDownloads called with:', { filename, blobSize: blob.size });
+
+    // Native: Save directly to Documents, then offer to share
+    if (window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform()) {
+      try {
+        console.log('Native platform detected, saving to Documents...');
+        const fs = await new Function('return import("@capacitor/filesystem")')();
+        const base64 = await blobToBase64(blob);
+        console.log('Converted to base64');
+        
+        // Save to Documents
+        const saveResult = await fs.Filesystem.writeFile({ 
+          path: filename, 
+          data: base64, 
+          directory: fs.FilesystemDirectory.Documents 
+        });
+        console.log('File saved to Documents:', saveResult);
+        
+        // Also save backup to app data folder
+        try {
+          const backupPath = `TimeSheetLogger/exports/${filename}`;
+          await fs.Filesystem.writeFile({ 
+            path: backupPath, 
+            data: base64, 
+            directory: fs.FilesystemDirectory.Documents 
+          });
+          console.log('Backup copy saved to app data folder');
+        } catch (backupErr) {
+          console.warn('Failed to save backup copy:', backupErr);
+        }
+        
+        // Now attempt to share
+        try {
+          console.log('Attempting to share file...');
+          const ShareMod = await new Function('return import("@capacitor/share")')();
+          const Share = ShareMod && (ShareMod.Share || ShareMod.default) ? (ShareMod.Share || ShareMod.default) : ShareMod;
+          
+          if (Share && typeof Share.share === 'function') {
+            // Try to get file URI
+            let fileUri = saveResult.uri || `file://${saveResult.path}`;
+            
+            // Try to get proper URI from Capacitor if available
+            try {
+              if (fs.Filesystem && typeof fs.Filesystem.getUri === 'function') {
+                const uriRes = await fs.Filesystem.getUri({ 
+                  path: filename, 
+                  directory: fs.FilesystemDirectory.Documents 
+                });
+                fileUri = uriRes.uri || fileUri;
+                console.log('Got URI from Capacitor:', fileUri);
+              }
+            } catch (e) {
+              console.warn('Could not get URI from Capacitor, using fallback:', e);
+            }
+            
+            console.log('Sharing with URI:', fileUri);
+            await Share.share({ 
+              title: filename, 
+              text: 'Timesheet PDF exported', 
+              url: fileUri 
+            });
+            console.log('Share dialog opened');
+            window.alert(`PDF saved to Documents and share dialog opened. File: ${filename}`);
+            return true;
+          }
+        } catch (shareErr) {
+          console.warn('Share failed, but file was already saved:', shareErr);
+          window.alert(`PDF saved to Documents folder: ${filename}`);
+          return true;
+        }
+      } catch (err) {
+        console.error('Native save failed:', err);
+        throw new Error(`Failed to save to device: ${err.message}`);
+      }
+    }
+
+    // Web: fallback to download anchor
+    console.log('Web platform detected, using browser download...');
+    try {
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(() => {
+        a.remove();
+        URL.revokeObjectURL(url);
+      }, 100);
+      return true;
+    } catch (err) {
+      console.error('Download fallback failed:', err);
+      throw new Error(`Could not download file: ${err.message}`);
+    }
+  };
 
   const generatePDF = async () => {
     const todayJobs = getTodayJobs();
@@ -470,6 +727,8 @@ export default function TimesheetLogger() {
         y += 6;
         doc.text(`Client: ${job.client}`, 12, y);
         y += 6;
+        doc.text(`Email: ${job.clientEmail || ''}`, 12, y);
+        y += 6;
         doc.text(`Phone: ${job.clientPhone}`, 12, y);
         y += 6;
         doc.text(`Address: ${job.clientAddress}`, 12, y);
@@ -487,11 +746,116 @@ export default function TimesheetLogger() {
       });
 
       const filename = `timesheet-${date.replace(/\//g, '-')}.pdf`;
-      doc.save(filename);
+      // Create blob and use save helper so users can choose where to save (when supported)
+      const blob = doc.output('blob');
+      await saveBlobToFile(blob, filename);
       window.alert('PDF generated successfully!');
     } catch (error) {
       console.error('PDF generation error:', error);
       window.alert('Failed to generate PDF');
+    }
+  };
+
+  // Generate monthly PDF with overtime summary and job cards
+  const createMonthlyPDFBlob = async () => {
+    const { jsPDF } = await import('jspdf');
+    const doc = new jsPDF();
+    const now = new Date();
+    const month = now.toLocaleString(undefined, { month: 'long', year: 'numeric' });
+    doc.setFontSize(16);
+    doc.text(`MONTHLY TIMESHEET - ${month}`, 10, 14);
+    doc.setFontSize(12);
+    let y = 26;
+
+    const monthJobs = jobs.filter(j => {
+      const d = new Date(j.startTime);
+      return d.getMonth() === now.getMonth() && d.getFullYear() === now.getFullYear();
+    });
+
+    const totalOvertime = monthJobs.reduce((sum, j) => sum + parseFloat(j.overtime || 0), 0).toFixed(2);
+
+    doc.text(`Total Overtime: ${totalOvertime} hrs`, 10, y);
+    y += 10;
+
+    doc.text('Overtime Breakdown:', 10, y);
+    y += 8;
+
+    monthJobs.forEach((job, idx) => {
+      if (parseFloat(job.overtime || 0) > 0) {
+        doc.text(`${formatDate(job.startTime)} - ${job.client} - ${job.overtime} hrs (${job.afterHours ? 'After Hours' : 'Normal'})`, 12, y);
+        y += 6;
+        if (y > 270) { doc.addPage(); y = 20; }
+      }
+    });
+
+    // Add job cards
+    doc.addPage();
+    doc.setFontSize(14);
+    doc.text('JOB CARDS', 10, 14);
+    y = 26;
+
+    monthJobs.forEach((job, idx) => {
+      doc.setFontSize(12);
+      doc.text(`Job ${idx + 1}${job.afterHours ? ' (AFTER HOURS)' : ''}`, 10, y);
+      y += 6;
+      doc.text(`Date: ${formatDate(job.startTime)}`, 12, y);
+      y += 6;
+      doc.text(`Client: ${job.client}`, 12, y);
+      y += 6;
+      doc.text(`Email: ${job.clientEmail || ''}`, 12, y);
+      y += 6;
+      doc.text(`Phone: ${job.clientPhone}`, 12, y);
+      y += 6;
+      doc.text(`Address: ${job.clientAddress}`, 12, y);
+      y += 6;
+      doc.text(`Description: ${job.jobDescription}`, 12, y);
+      y += 6;
+      doc.text(`Resolution: ${job.resolution || ''}`, 12, y);
+      y += 6;
+      doc.text(`Hours: ${job.hoursWorked || ''} Overtime: ${job.overtime || '0.00'}`, 12, y);
+      y += 10;
+
+      if (y > 270) { doc.addPage(); y = 20; }
+    });
+
+    const filename = `timesheet-month-${now.getFullYear()}-${now.getMonth() + 1}.pdf`;
+    const blob = doc.output('blob');
+    console.log('Monthly PDF created:', { filename, blobSize: blob.size, blobType: blob.type, jobCount: monthJobs.length });
+    return { blob, filename };
+  };
+
+  const generateMonthlyPDF = async () => {
+    const monthJobs = getJobsByMonth(new Date());
+    console.log('generateMonthlyPDF called with', monthJobs.length, 'jobs');
+    if (monthJobs.length === 0) {
+      window.alert('No jobs found for this month. Please complete some jobs first.');
+      return;
+    }
+    try {
+      const { blob, filename } = await createMonthlyPDFBlob();
+      console.log('About to save blob...');
+      await saveBlobToFile(blob, filename);
+      console.log('saveBlobToFile completed successfully');
+      window.alert('Monthly PDF generated successfully!');
+    } catch (err) {
+      console.error('Monthly PDF error', err);
+      window.alert(`Failed to generate monthly PDF: ${err.message}`);
+    }
+  };
+
+  const generateMonthlyPDFAndShare = async () => {
+    const monthJobs = getJobsByMonth(new Date());
+    if (monthJobs.length === 0) {
+      window.alert('No jobs found for this month. Please complete some jobs first.');
+      return;
+    }
+    try {
+      const { blob, filename } = await createMonthlyPDFBlob();
+      await saveBlobToDownloads(blob, filename);
+      window.alert('Monthly PDF shared / downloaded successfully!');
+    } catch (err) {
+      console.error('Monthly PDF share error', err);
+      window.alert(`Failed to share/download monthly PDF: ${err.message}`);
     }
   };
 
@@ -645,6 +1009,13 @@ export default function TimesheetLogger() {
                   onChange={(e) => setClientAddress(e.target.value)}
                   className="w-full p-3 rounded-lg text-gray-800 mb-3"
                 />
+                <input
+                  type="email"
+                  placeholder="Client Email Address"
+                  value={clientEmail}
+                  onChange={(e) => setClientEmail(e.target.value)}
+                  className="w-full p-3 rounded-lg text-gray-800 mb-3"
+                />
                 <textarea
                   placeholder="Job Description / Call Out Reason"
                   value={jobDescription}
@@ -701,81 +1072,267 @@ export default function TimesheetLogger() {
               </div>
               <span className="text-2xl font-bold text-amber-600">{getMonthlyOvertime()} hrs</span>
             </div>
+            <div className="mt-3 text-sm text-gray-600">
+              <strong>Overtime breakdown:</strong>
+              <ul className="mt-2 list-disc list-inside">
+                {jobs
+                  .filter(j => (new Date(j.startTime)).getMonth() === (new Date()).getMonth())
+                  .filter(j => parseFloat(j.overtime || 0) > 0)
+                  .map(j => (
+                    <li key={j.id}>{`${formatDate(j.startTime)} — ${j.client} — ${j.overtime} hrs (${j.afterHours ? 'After Hours' : 'Normal'})`}</li>
+                  ))}
+              </ul>
+            </div>
           </div>
 
           {/* Export Button */}
-          <button
-            onClick={generatePDF}
-            className="w-full py-3 bg-green-600 text-white rounded-lg font-semibold hover:bg-green-700 transition flex items-center justify-center gap-2 mb-6"
-          >
-            <Download size={20} />
-            Export Today's Timesheet
-          </button>
+          <div className="space-y-3 mb-3">
+            <div className="flex items-start gap-3">
+              <button
+                onClick={generatePDF}
+                className="flex-1 py-3 bg-green-600 text-white rounded-lg font-semibold hover:bg-green-700 transition flex items-center justify-center gap-2"
+              >
+                <Download size={20} />
+                Export Today's Timesheet
+              </button>
+              <button
+                onClick={() => setShowSaveHelp(true)}
+                aria-label="How saving works"
+                title="How saving works"
+                className="p-2 rounded-md bg-white bg-opacity-20 hover:bg-opacity-30 text-white"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="feather feather-help-circle"><circle cx="12" cy="12" r="10"></circle><path d="M9.09 9a3 3 0 1 1 5.82 1c0 2-3 2.5-3 4"></path><line x1="12" y1="17" x2="12" y2="17"></line></svg>
+              </button>
+            </div>
 
-          {/* Today's Jobs */}
+            <div className="flex items-start gap-3">
+              <button
+                onClick={generateMonthlyPDF}
+                className="flex-1 py-3 bg-blue-600 text-white rounded-lg font-semibold hover:bg-blue-700 transition flex items-center justify-center gap-2"
+              >
+                <Download size={20} />
+                Export Month's Timesheets & Job Cards
+              </button>
+              <button
+                onClick={generateMonthlyPDFAndShare}
+                className="px-4 py-3 bg-white text-blue-600 rounded-lg border border-blue-200 hover:bg-blue-50 transition flex items-center gap-2"
+                title="Save to Downloads or use system Share"
+              >
+                <Download size={18} />
+                Save to Downloads / Share
+              </button>
+            </div>
+            <div className="text-sm text-gray-600 mt-2">Tip: in Chromium-based browsers you may be prompted to choose the save location; on mobile you can use the system Share to save to Downloads.</div>
+          </div>
+
+          {/* Save help modal */}
+          {showSaveHelp && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-40">
+              <div className="bg-white rounded-lg max-w-lg w-full p-6">
+                <div className="flex items-start justify-between">
+                  <h3 className="text-lg font-semibold">How saving works</h3>
+                  <button onClick={() => setShowSaveHelp(false)} aria-label="Close help" className="text-gray-500 hover:text-gray-700">✕</button>
+                </div>
+                <div className="mt-4 text-sm text-gray-700 space-y-2">
+                  <p>When you export a PDF, the app will try the following (in order):</p>
+                  <ul className="list-disc list-inside">
+                    <li><strong>Desktop Chromium:</strong> you will be prompted to choose a save location (Save File Picker).</li>
+                    <li><strong>Native (Capacitor):</strong> the file is written to the app Documents folder and can be shared.</li>
+                    <li><strong>Fallback:</strong> the browser will start a normal download to your default downloads folder.</li>
+                  </ul>
+                  <p>If your browser does not support choosing a location, check your browser download settings or use a Chromium-based browser that supports the File System Access API.</p>
+                  <p className="mt-2"><strong>Android / Native:</strong> the app will request location permission when you attempt to capture location — please allow it. When available, the <strong>Save to Downloads / Share</strong> button will open the system share dialog allowing you to save or send the file (no browser download). The app writes exported PDFs to the app's Documents folder by default (no extra permission required). On some Android versions additional storage permissions may be required to save files to shared directories.</p>
+                </div>
+                <div className="mt-4 text-right">
+                  <button onClick={() => setShowSaveHelp(false)} className="px-4 py-2 bg-indigo-600 text-white rounded">Got it</button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Job View Toggle and Display */}
           <div>
-            <h3 className="text-xl font-semibold text-gray-800 mb-4">Today's Jobs</h3>
-            {getTodayJobs().length === 0 ? (
-              <p className="text-gray-500 text-center py-8">No jobs completed today</p>
-            ) : (
-              <div className="space-y-3">
-                {getTodayJobs().map((job) => (
-                  <div key={job.id} className="bg-gray-50 rounded-lg p-4 border border-gray-200">
-                    <div className="flex justify-between items-start mb-2">
-                      <div className="flex items-center gap-2">
-                        <Users className="text-indigo-600" size={18} />
-                        <span className="font-semibold text-gray-800">{job.client}</span>
-                        {job.afterHours && (
-                          <span className="text-xs bg-amber-100 text-amber-700 px-2 py-1 rounded-full font-semibold">
-                            After Hours
-                          </span>
-                        )}
+            <div className="flex items-center gap-3 mb-4">
+              <button
+                onClick={() => setViewMode('today')}
+                className={`px-4 py-2 rounded-lg font-semibold transition flex items-center gap-2 ${
+                  viewMode === 'today'
+                    ? 'bg-indigo-600 text-white'
+                    : 'bg-gray-200 text-gray-800 hover:bg-gray-300'
+                }`}
+              >
+                <Clock size={18} />
+                Today
+              </button>
+              <button
+                onClick={() => setViewMode('history')}
+                className={`px-4 py-2 rounded-lg font-semibold transition flex items-center gap-2 ${
+                  viewMode === 'history'
+                    ? 'bg-indigo-600 text-white'
+                    : 'bg-gray-200 text-gray-800 hover:bg-gray-300'
+                }`}
+              >
+                <History size={18} />
+                History
+              </button>
+            </div>
+
+            {viewMode === 'today' ? (
+              <div>
+                <h3 className="text-xl font-semibold text-gray-800 mb-4">Today's Jobs</h3>
+                {getTodayJobs().length === 0 ? (
+                  <p className="text-gray-500 text-center py-8">No jobs completed today</p>
+                ) : (
+                  <div className="space-y-3">
+                    {getTodayJobs().map((job) => (
+                      <div key={job.id} className="bg-gray-50 rounded-lg p-4 border border-gray-200">
+                        <div className="flex justify-between items-start mb-2">
+                          <div className="flex items-center gap-2">
+                            <Users className="text-indigo-600" size={18} />
+                            <span className="font-semibold text-gray-800">{job.client}</span>
+                            {job.afterHours && (
+                              <span className="text-xs bg-amber-100 text-amber-700 px-2 py-1 rounded-full font-semibold">
+                                After Hours
+                              </span>
+                            )}
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <span className="text-sm text-gray-500">{formatDate(job.startTime)}</span>
+                            <button
+                              onClick={() => deleteJob(job.id)}
+                              className="text-sm text-red-600 font-semibold ml-3 hover:underline"
+                            >
+                              Delete
+                            </button>
+                          </div>
+                        </div>
+                        <div className="text-sm mb-2">
+                          <p className="text-gray-600">📞 {job.clientPhone}</p>
+                          <p className="text-gray-600">📍 {job.clientAddress}</p>
+                        </div>
+                        <div className="bg-blue-50 p-3 rounded mb-2 text-sm">
+                          <p className="font-semibold text-gray-700 mb-1">Job Description:</p>
+                          <p className="text-gray-600">{job.jobDescription}</p>
+                        </div>
+                        <div className="bg-green-50 p-3 rounded mb-2 text-sm">
+                          <p className="font-semibold text-gray-700 mb-1">Resolution:</p>
+                          <p className="text-gray-600">{job.resolution}</p>
+                        </div>
+                        <div className="grid grid-cols-2 gap-2 text-sm mb-2">
+                          <div>
+                            <span className="text-gray-600">Start:</span> {formatTime(job.startTime)}
+                          </div>
+                          <div>
+                            <span className="text-gray-600">End:</span> {formatTime(job.endTime)}
+                          </div>
+                          <div>
+                            <span className="text-gray-600">Hours:</span> {job.hoursWorked}
+                          </div>
+                          <div className="text-amber-600 font-semibold">
+                            <span className="text-gray-600">OT:</span> {job.overtime}
+                          </div>
+                        </div>
+                        <div className="text-xs text-gray-500 mb-1 flex items-center gap-1">
+                          <MapPin size={12} />
+                          {job.location}
+                        </div>
+                        <div className="text-sm text-indigo-600 font-semibold border-t pt-2">
+                          👤 Technician: {job.technician}
+                        </div>
                       </div>
-                      <div className="flex items-center gap-2">
-                        <span className="text-sm text-gray-500">{formatDate(job.startTime)}</span>
-                        <button
-                          onClick={() => deleteJob(job.id)}
-                          className="text-sm text-red-600 font-semibold ml-3 hover:underline"
-                        >
-                          Delete
-                        </button>
-                      </div>
-                    </div>
-                    <div className="text-sm mb-2">
-                      <p className="text-gray-600">📞 {job.clientPhone}</p>
-                      <p className="text-gray-600">📍 {job.clientAddress}</p>
-                    </div>
-                    <div className="bg-blue-50 p-3 rounded mb-2 text-sm">
-                      <p className="font-semibold text-gray-700 mb-1">Job Description:</p>
-                      <p className="text-gray-600">{job.jobDescription}</p>
-                    </div>
-                    <div className="bg-green-50 p-3 rounded mb-2 text-sm">
-                      <p className="font-semibold text-gray-700 mb-1">Resolution:</p>
-                      <p className="text-gray-600">{job.resolution}</p>
-                    </div>
-                    <div className="grid grid-cols-2 gap-2 text-sm mb-2">
-                      <div>
-                        <span className="text-gray-600">Start:</span> {formatTime(job.startTime)}
-                      </div>
-                      <div>
-                        <span className="text-gray-600">End:</span> {formatTime(job.endTime)}
-                      </div>
-                      <div>
-                        <span className="text-gray-600">Hours:</span> {job.hoursWorked}
-                      </div>
-                      <div className="text-amber-600 font-semibold">
-                        <span className="text-gray-600">OT:</span> {job.overtime}
-                      </div>
-                    </div>
-                    <div className="text-xs text-gray-500 mb-1 flex items-center gap-1">
-                      <MapPin size={12} />
-                      {job.location}
-                    </div>
-                    <div className="text-sm text-indigo-600 font-semibold border-t pt-2">
-                      👤 Technician: {job.technician}
-                    </div>
+                    ))}
                   </div>
-                ))}
+                )}
+              </div>
+            ) : (
+              <div>
+                <h3 className="text-xl font-semibold text-gray-800 mb-4">Job History</h3>
+                
+                {/* Date Navigation */}
+                <div className="flex items-center justify-between mb-4 bg-white p-3 rounded-lg border border-gray-200">
+                  <button
+                    onClick={() => setHistoryDate(new Date(historyDate.getTime() - 24 * 60 * 60 * 1000))}
+                    className="p-2 hover:bg-gray-100 rounded-lg transition"
+                  >
+                    <ChevronLeft size={20} className="text-gray-600" />
+                  </button>
+                  <div className="text-center">
+                    <p className="text-sm text-gray-600">Viewing:</p>
+                    <p className="text-lg font-semibold text-gray-800">{formatDate(historyDate)}</p>
+                  </div>
+                  <button
+                    onClick={() => setHistoryDate(new Date(historyDate.getTime() + 24 * 60 * 60 * 1000))}
+                    className="p-2 hover:bg-gray-100 rounded-lg transition"
+                  >
+                    <ChevronRight size={20} className="text-gray-600" />
+                  </button>
+                </div>
+
+                {/* History Jobs Display */}
+                {getJobsByDate(historyDate).length === 0 ? (
+                  <p className="text-gray-500 text-center py-8">No jobs found for {formatDate(historyDate)}</p>
+                ) : (
+                  <div className="space-y-3">
+                    {getJobsByDate(historyDate).map((job) => (
+                      <div key={job.id} className="bg-gray-50 rounded-lg p-4 border border-gray-200">
+                        <div className="flex justify-between items-start mb-2">
+                          <div className="flex items-center gap-2">
+                            <Users className="text-indigo-600" size={18} />
+                            <span className="font-semibold text-gray-800">{job.client}</span>
+                            {job.afterHours && (
+                              <span className="text-xs bg-amber-100 text-amber-700 px-2 py-1 rounded-full font-semibold">
+                                After Hours
+                              </span>
+                            )}
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <span className="text-sm text-gray-500">{formatDate(job.startTime)}</span>
+                            <button
+                              onClick={() => deleteJob(job.id)}
+                              className="text-sm text-red-600 font-semibold ml-3 hover:underline"
+                            >
+                              Delete
+                            </button>
+                          </div>
+                        </div>
+                        <div className="text-sm mb-2">
+                          <p className="text-gray-600">📞 {job.clientPhone}</p>
+                          <p className="text-gray-600">📧 {job.clientEmail || 'No email'}</p>
+                          <p className="text-gray-600">📍 {job.clientAddress}</p>
+                        </div>
+                        <div className="bg-blue-50 p-3 rounded mb-2 text-sm">
+                          <p className="font-semibold text-gray-700 mb-1">Job Description:</p>
+                          <p className="text-gray-600">{job.jobDescription}</p>
+                        </div>
+                        <div className="bg-green-50 p-3 rounded mb-2 text-sm">
+                          <p className="font-semibold text-gray-700 mb-1">Resolution:</p>
+                          <p className="text-gray-600">{job.resolution}</p>
+                        </div>
+                        <div className="grid grid-cols-2 gap-2 text-sm mb-2">
+                          <div>
+                            <span className="text-gray-600">Start:</span> {formatTime(job.startTime)}
+                          </div>
+                          <div>
+                            <span className="text-gray-600">End:</span> {formatTime(job.endTime)}
+                          </div>
+                          <div>
+                            <span className="text-gray-600">Hours:</span> {job.hoursWorked}
+                          </div>
+                          <div className="text-amber-600 font-semibold">
+                            <span className="text-gray-600">OT:</span> {job.overtime}
+                          </div>
+                        </div>
+                        <div className="text-xs text-gray-500 mb-1 flex items-center gap-1">
+                          <MapPin size={12} />
+                          {job.location}
+                        </div>
+                        <div className="text-sm text-indigo-600 font-semibold border-t pt-2">
+                          👤 Technician: {job.technician}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
             )}
           </div>

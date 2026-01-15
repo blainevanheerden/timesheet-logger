@@ -4,19 +4,21 @@
   "private": true,
   "type": "module",
   "dependencies": {
+    "@capacitor/android": "^5.7.8",
     "@capacitor/core": "^5.7.8",
     "@capacitor/geolocation": "^5.0.8",
+    "better-sqlite3": "^8.0.0",
+    "body-parser": "^1.20.2",
+    "cors": "^2.8.5",
+    "express": "^4.18.2",
     "html2canvas": "^1.4.1",
     "jspdf": "^2.5.1",
     "lucide-react": "^0.271.0",
     "react": "^18.2.0",
-    "react-dom": "^18.2.0",
-    "express": "^4.18.2",
-    "better-sqlite3": "^8.0.0",
-    "cors": "^2.8.5",
-    "body-parser": "^1.20.2"
+    "react-dom": "^18.2.0"
   },
   "devDependencies": {
+    "@capacitor/cli": "^6.2.1",
     "@playwright/test": "^1.40.0",
     "@vitejs/plugin-react": "^4.0.0",
     "autoprefixer": "^10.4.0",
